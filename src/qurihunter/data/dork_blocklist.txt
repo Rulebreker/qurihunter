@@ -1,0 +1,67 @@
+# Generated dorks containing any of these (case-insensitive substring) are rejected. Edit to taste; this list
+# also applies to dorks you add via /chat. Purpose: never target exposed data or exploitation.
+password
+passwd
+credential
+secret
+api key
+api_key
+apikey
+token
+private key
+id_rsa
+.env
+env file
+config file
+configuration file
+web.config
+wp-config
+backup
+.bak
+.sql
+.dump
+dump
+database
+phpmyadmin
+index of
+parent directory
+intitle:index
+filetype:
+ext:
+cache:
+link:
+related:
+webcam
+camera
+cctv
+login
+signin
+sign in
+admin
+cpanel
+.git
+.svn
+.htaccess
+exposed
+leak
+confidential
+ssn
+social security
+credit card
+passport
+personal data
+exploit
+payload
+shell
+rce
+xss
+sqli
+sql injection
+vulnerable site
+open positions
+careers
+job opening
+jobs
+hiring
+vacancy
+salary

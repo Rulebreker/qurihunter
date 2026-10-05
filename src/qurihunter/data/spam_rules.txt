@@ -1,0 +1,23 @@
+# qurihunter spam / junk rules. This file is COPIED to ~/.qurihunter/spam_rules.txt on first use - edit THAT copy.
+# Every drop is logged with the rule that fired. Lines:  kind: value        (# starts a comment)
+#   url:    regex searched in the full URL            host:  regex searched in the host
+#   path:   regex searched in the URL path            title: regex searched in the title
+#   word:   comma separated words (whole word, case-insensitive) searched in title + snippet + URL
+#   script: maximum share (0-1) of non-Latin letters in the title for a Latin-script dork
+# A page whose path clearly names a disclosure/bounty policy is exempt from the soft path/host rules (not from url/word/script).
+
+# redirectors and proxy / doorway parameters
+url: [?&][\w-]*(?:url|redirect|goto|link|target|dest|web|site|ref)[\w-]*=\s*(?:https?|%68%74%74%70)
+url: /(?:get|go|out|redirect|link|r|click)\.php\?
+url: (?:https?://|%2f%2f)[^?#]*(?:https?://|%3a%2f%2f)
+host: ^(?:[\w-]+\.){0,2}[\w]*(?:-[\w]+){4,}\.
+# jobs / tickets / rentals / classifieds
+path: /(?:jobs?|job-?offers?|stellen|stellenangebote?|stellenmarkt|karriere|careers?|vacanc(?:y|ies)|emploi|offres?-d-emploi)(?:/|-|$)
+path: /(?:tickets?|concert-tickets|events?|eventi|veranstaltungen)(?:/|-|$)
+path: /(?:ferienwohnung(?:en)?|ferienhaus|ferienhaeuser|vacation-rentals?|rentals?|immobilien|real-estate|apartments?|wohnungen)(?:/|-|$)
+path: /(?:classifieds?|kleinanzeigen|anzeigen|marktplatz|annonces?)(?:/|-|$)
+host: (?:ticket|ferien|stellen|jobs?zueri|kleinanzeigen|classified|immobil)
+# adult / gambling / pharma
+word: casino, casinos, slot, slots, poker, betting, jackpot, porn, porno, xxx, escort, viagra, cialis, onlyfans, sex
+# non-Latin titles for a Latin-script dork (unless the dork's own language uses that script)
+script: 0.5

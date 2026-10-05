@@ -1,0 +1,46 @@
+# A generated dork must contain at least one of these terms (case-insensitive substring).
+# The tool exists ONLY to discover official vulnerability-disclosure / bug-bounty program pages.
+vulnerability disclosure
+responsible disclosure
+coordinated disclosure
+coordinated vulnerability
+vulnerability reporting
+report a vulnerability
+report vulnerabilities
+security vulnerability
+vulnerability reward
+vulnerability rewards
+bug bounty
+bounty program
+security.txt
+safe harbor
+safe harbour
+hall of fame
+security researchers
+disclosure policy
+disclosure program
+security reward
+# other languages
+schwachstelle
+offenlegung
+sicherheitslücke
+divulgation
+vulnérabilité
+faille de sécurité
+divulgación
+vulnerabilidad
+divulgação
+vulnerabilidade
+vulnerabilità
+segnalazione
+kwetsbaarheid
+sårbarhet
+sårbarhed
+sikkerhetshull
+sårbarheter
+podatność
+luka bezpieczeństwa
+脆弱性
+취약점
+уязвимост
+güvenlik açığı

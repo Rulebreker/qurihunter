@@ -1,0 +1,137 @@
+# qurihunter default dork list
+# One dork per line. Lines starting with # are comments. Blank lines are ignored.
+# Purpose: find OFFICIAL bug bounty / vulnerability disclosure program pages (new launches).
+# Hardcoded dates are never used in dorks. Recency comes from a global
+# "recency window" setting in the tool, so these dorks never go stale.
+# Operators (inurl:, intitle:, site:) are translated per search provider by the tool.
+
+# ---------- 1. Generic VDP / responsible disclosure pages ----------
+"vulnerability disclosure program" inurl:security
+"vulnerability disclosure policy" inurl:security
+"responsible disclosure" inurl:security
+"responsible disclosure policy" inurl:responsible-disclosure
+"coordinated vulnerability disclosure" inurl:security
+"report a vulnerability" inurl:security
+"how to report a security vulnerability" inurl:security
+"vulnerability reporting policy"
+"safe harbor" "good faith" "security researchers"
+"we welcome reports from security researchers"
+"you have found a security vulnerability"
+"found a security issue" "contact us" inurl:security
+"in scope" "out of scope" "responsible disclosure"
+"scope" "out of scope" "vulnerability" inurl:security
+intitle:"Vulnerability Disclosure Program"
+intitle:"Responsible Disclosure"
+intitle:"Security Policy" "report a vulnerability"
+
+# ---------- 2. Bounty / reward wording ----------
+"bug bounty program" inurl:security
+"bug bounty program" inurl:bug-bounty
+"bug bounty policy"
+"vulnerability rewards" inurl:security
+"vulnerability reward program"
+"vulnerability rewards program"
+"security bug compensation"
+"security rewards" inurl:security
+"bounty range" inurl:security
+"monetary reward" intitle:"Vulnerability Disclosure Program"
+"cash reward" "responsible disclosure"
+"monetary compensation" "responsible disclosure"
+"if you report a vulnerability" "we will pay"
+"eligible for bounty" inurl:responsible-disclosure
+"eligible for a reward" "vulnerability"
+"payment" "valid vulnerability" "bounty"
+inurl:/responsible-disclosure "reward" "bounty"
+
+# ---------- 3. Hall of fame / acknowledgments (signals an active program) ----------
+intitle:"Hall of Fame" "security" "reward"
+"honor roll" "security researchers"
+"acknowledgments" "security researchers" "bounty"
+"thank you to the researchers" "vulnerability"
+
+# ---------- 4. security.txt files ----------
+inurl:/.well-known/security.txt "bounty"
+inurl:/.well-known/security.txt "reward"
+inurl:/.well-known/security.txt "Policy:" "bounty"
+inurl:/.well-known/security.txt "Acknowledgments:"
+"security.txt" "Contact:" "Policy:" "bounty"
+
+# ---------- 5. Currency signals ----------
+"vulnerability" "bounty" "USD"
+"vulnerability rewards" "$" "bounty"
+"vulnerability" "reward" "EUR"
+"bug bounty" "€"
+"vulnerability" "reward" "₹"
+"bug bounty" "INR"
+"bug bounty" "GBP"
+"vulnerability" "bounty" "£"
+"vulnerability" "bounty" "CHF"
+"honor roll" "CHF"
+"vulnerability" "reward" "SEK"
+"bug bounty" "AUD"
+"bug bounty" "CAD"
+"bug bounty" "SGD"
+
+# ---------- 6. Country / sector domains ----------
+"vulnerability disclosure" site:.gov
+"vulnerability disclosure" site:.edu
+"report vulnerabilities" site:.edu
+"vulnerability disclosure" site:.eu
+"bug bounty" site:.eu
+"responsible disclosure" site:.de
+"responsible disclosure" site:.nl
+"responsible disclosure" site:.ch
+"vulnerability disclosure" site:.ch
+"responsible disclosure" site:.se
+"vulnerability disclosure" site:.uk
+"vulnerability disclosure" site:.us
+"vulnerability disclosure" site:.in
+"vulnerability disclosure" site:.fr
+"vulnerability disclosure" site:.it
+"vulnerability disclosure" site:.es
+"vulnerability disclosure" site:.pl
+"vulnerability disclosure" site:.dk
+"vulnerability disclosure" site:.no
+"vulnerability disclosure" site:.fi
+"vulnerability disclosure" site:.be
+"vulnerability disclosure" site:.at
+"vulnerability disclosure" site:.jp
+"vulnerability disclosure" site:.sg
+"vulnerability disclosure" site:.au
+"vulnerability disclosure" site:.ca
+
+# ---------- 7. Startups / tech domains ----------
+site:.io inurl:security "bounty"
+site:.ai inurl:security "bounty"
+site:.app inurl:security "bounty"
+site:.dev inurl:security "vulnerability"
+site:.co inurl:security "bounty"
+
+# ---------- 8. Other languages ----------
+"Schwachstelle melden" inurl:security
+"verantwortungsvolle Offenlegung" "Schwachstelle"
+"Responsible Disclosure" "Schwachstelle" "Belohnung"
+"divulgation responsable" "vulnérabilité"
+"politique de divulgation" "vulnérabilités"
+"divulgación responsable" "vulnerabilidad"
+"divulgação responsável" "vulnerabilidade"
+"segnalazione vulnerabilità" "responsible disclosure"
+"kwetsbaarheid melden" "responsible disclosure"
+"sårbarhet" "responsible disclosure"
+"ansvarsfull rapportering" "sårbarhet"
+
+# ---------- 9. Launch announcements (blogs / news) ----------
+"launched our bug bounty program"
+"announcing our bug bounty program"
+"introducing our bug bounty program"
+"we are launching a bug bounty"
+"launching our vulnerability disclosure program"
+"launched our vulnerability disclosure program"
+"new bug bounty program" "now live"
+"public bug bounty program" "now open"
+
+# ---------- 10. Combined (the "big dork", split into smaller pieces) ----------
+(inurl:security | inurl:responsible-disclosure) ("bug bounty" | "vulnerability disclosure") ("reward" | "bounty")
+(inurl:bug-bounty | inurl:vulnerability-disclosure) ("reward" | "cash" | "payment")
+(inurl:security | inurl:.well-known/security.txt) ("responsible disclosure" | "security vulnerability") ("monetary" | "payment")
+inurl:security intext:"Bug Bounty Program" "$1000" | "$500"

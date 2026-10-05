@@ -1,0 +1,18 @@
+.venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+# secrets and local data — never commit
+.qurihunter/
+qurihunter-home/
+config.json
+config.json.corrupt
+*.db
+*.db-wal
+*.db-shm
+backups/
+.env
+qurihunter-memory.json
+programs.csv
+programs.json
+.jython_cache/

@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qurihunter"
+version = "0.4.2"
+description = "CLI agent that discovers newly launched bug bounty / VDP programs and alerts you via Telegram or email"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["rich>=13", "requests>=2.31", "psutil>=5.9", "prompt_toolkit>=3.0"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+qurihunter = "qurihunter.cli:main"
+
+[tool.setuptools.package-data]
+qurihunter = ["data/*.txt"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
