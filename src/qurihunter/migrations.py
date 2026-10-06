@@ -135,7 +135,29 @@ CREATE INDEX IF NOT EXISTS ix_llm_usage_ts ON llm_usage(ts);
 """)
 
 
-MIGRATIONS = [m1_base, m2_v2, m3_alerts, m4_reclassify, m5_sequence]
+def m6_validation(c: sqlite3.Connection) -> None:
+    """v0.5: LLM program validation (cache by URL + content hash, human labels) and AI-dork promotion bookkeeping.
+    Additive only: new columns default to NULL/0, so every existing row keeps its behaviour (validity NULL = never assessed;
+    such rows are validated only if they become due to alert). Reverse = the backup taken before migration."""
+    for col, decl in (("validity", "TEXT"), ("validity_reason", "TEXT"), ("validity_line", "TEXT"), ("validated_at", "TEXT"), ("validation_id", "INTEGER"),
+                      ("label", "TEXT"), ("label_note", "TEXT"), ("labeled_at", "TEXT"), ("found_by_dork", "INTEGER")):
+        _add(c, "programs", col, decl)
+    for col, decl in (("origin", "TEXT"), ("promoted_at", "TEXT"), ("promotion_evidence", "TEXT"), ("demoted_at", "TEXT"),
+                      ("kept_total", "INTEGER NOT NULL DEFAULT 0")):
+        _add(c, "dorks", col, decl)
+    c.execute("UPDATE dorks SET origin = CASE grp WHEN 'default' THEN 'shipped' WHEN 'ai' THEN 'ai' ELSE 'custom' END "
+              "WHERE origin IS NULL")
+    c.executescript("""
+CREATE INDEX IF NOT EXISTS ix_programs_dork ON programs(found_by_dork);
+CREATE TABLE IF NOT EXISTS validations(id INTEGER PRIMARY KEY, url_hash TEXT NOT NULL, url TEXT, content_hash TEXT NOT NULL,
+  final_url TEXT, http_status INTEGER, model_id TEXT, created_at TEXT, assessment TEXT, checks TEXT, decision TEXT,
+  confidence REAL, reason TEXT, parsed_via TEXT, UNIQUE(url_hash, content_hash));
+CREATE TABLE IF NOT EXISTS program_labels(id INTEGER PRIMARY KEY, program_id INTEGER, url TEXT, title TEXT, label TEXT,
+  note TEXT, ts TEXT, llm_decision TEXT, dork_id INTEGER);
+""")
+
+
+MIGRATIONS = [m1_base, m2_v2, m3_alerts, m4_reclassify, m5_sequence, m6_validation]
 
 
 def backup(src: sqlite3.Connection, path: Path, tag: str) -> Path:

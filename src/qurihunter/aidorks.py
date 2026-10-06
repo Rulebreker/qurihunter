@@ -109,7 +109,10 @@ def _context(cfg, db, provider) -> str:
     winners = db.c.execute("SELECT id,text,new_programs_found FROM dorks WHERE new_programs_found>0 "
                            "ORDER BY new_programs_found DESC LIMIT 8").fetchall()
     existing = db.c.execute("SELECT text FROM dorks ORDER BY id DESC LIMIT 60").fetchall()
-    recent = db.c.execute("SELECT name,country,kind,url FROM programs WHERE source='web' AND verdict='official_program' "
+    # poisoning guard: only programs that ended VERIFIED (validator or your 'valid' mark) feed the generator - short names and
+    # countries only, never page text
+    recent = db.c.execute("SELECT substr(name,1,80) name,country,kind,url FROM programs WHERE source='web' AND "
+                          "verdict='official_program' AND (label='valid' OR (label IS NULL AND validity='verified')) "
                           "ORDER BY id DESC LIMIT 40").fetchall()
     ccs = Counter((r["country"] or "?") for r in recent)
     words = Counter(w for r in recent for w in re.findall(r"[a-zà-ÿ]{4,}", (r["name"] or "").lower()))

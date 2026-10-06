@@ -151,9 +151,15 @@ def pending_reasons(db, cfg: dict) -> dict[str, int]:
     """Why each due alert has not gone out yet."""
     last = db.c.execute("SELECT ok FROM alert_log ORDER BY id DESC LIMIT 1").fetchone()
     failed = bool(last and not last["ok"])
+    from . import validation
     out: dict[str, int] = {}
+    manual_off = not cfg.get("alerts", {}).get("alert_manual_check", True)
+    can_validate = validation.configured(cfg)  # without a model the next scan sends them as 'not validated' right away
     for r, k in due(db, cfg):
+        # (validation reasons deliberately do not start with "waiting": the delivery-retry worker cannot validate)
         key = ("waiting for archive (Wayback) verification" if awaiting_archive(r, cfg)
+               else "validation pending (LLM page check: next scan or background worker)" if can_validate and validation.needs(r, cfg)
+               else "needs manual check - held (alerts.alert_manual_check is off)" if manual_off and validation.is_manual(r)
                else "last send failed - will retry" if failed else "ready - goes out on the next scan/retry")
         out[key] = out.get(key, 0) + 1
     return out

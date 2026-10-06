@@ -15,6 +15,7 @@ BUNDLED_DEFAULT = Path(__file__).parent / "data" / "default_dorks.txt"
 DATE_RE = re.compile(r"\s*\b(?:after|before):\S+|\s*\b(?:19|20)\d\d-\d\d-\d\d\b", re.I)
 HEADER = re.compile(r"^#\s*-{3,}\s*(.+?)\s*-{3,}\s*$")
 MODES = ("default", "custom", "both")
+ORIGIN = {"default": "shipped", "ai": "ai", "custom": "custom"}  # dorks.origin when a row is created (v0.5)
 
 
 def default_path() -> Path:
@@ -101,8 +102,8 @@ def import_file(db: DB, path: Path, grp: str = "custom", *, strip_dates: bool | 
         if db.c.execute("SELECT 1 FROM dorks WHERE norm=?", (norm,)).fetchone():
             rep.duplicates += 1
             continue
-        db.c.execute("INSERT INTO dorks(text,norm,grp,priority,created_at,section) VALUES(?,?,?,?,?,?)",
-                     (" ".join(text.split()), norm, grp, priority, dates.now_iso(), e.section))
+        db.c.execute("INSERT INTO dorks(text,norm,grp,priority,created_at,section,origin) VALUES(?,?,?,?,?,?,?)",
+                     (" ".join(text.split()), norm, grp, priority, dates.now_iso(), e.section, ORIGIN.get(grp, grp)))
         rep.added += 1
     db.commit()
     return rep
@@ -113,9 +114,9 @@ def add_dork(db: DB, text: str, grp: str, *, parent: int | None = None, rational
     norm = " ".join(text.lower().split())
     if db.c.execute("SELECT 1 FROM dorks WHERE norm=?", (norm,)).fetchone():
         return None
-    cur = db.c.execute("INSERT INTO dorks(text,norm,grp,priority,created_at,parent_dork_id,rationale,generated) "
-                       "VALUES(?,?,?,?,?,?,?,?)", (" ".join(text.split()), norm, grp, priority, dates.now_iso(),
-                                                   parent, rationale, int(generated)))
+    cur = db.c.execute("INSERT INTO dorks(text,norm,grp,priority,created_at,parent_dork_id,rationale,generated,origin) "
+                       "VALUES(?,?,?,?,?,?,?,?,?)", (" ".join(text.split()), norm, grp, priority, dates.now_iso(),
+                                                     parent, rationale, int(generated), ORIGIN.get(grp, grp)))
     db.commit()
     return cur.lastrowid
 
@@ -126,6 +127,8 @@ def ensure_default(db: DB) -> Report | None:
     p = default_path()
     if not p.exists():
         return None
+    from . import promotion
+    promotion.ensure_learned(db)  # promoted dorks survive upgrades / a reset database
     known = db.meta("default_list_size")
     size = str(p.stat().st_size)
     if known == size:
@@ -136,19 +139,40 @@ def ensure_default(db: DB) -> Report | None:
     return rep
 
 
-def reset_default(db: DB) -> Report:
-    """Restore dorks/default.txt exactly: re-enable, drop default dorks no longer in the file. Custom and AI dorks
-    are untouched."""
+def reset_default(db: DB, include_promoted: bool = False) -> Report:
+    """Restore dorks/default.txt exactly: re-enable, drop default dorks no longer in the file. Custom and AI dorks are
+    untouched. AI-promoted defaults are KEPT unless include_promoted, which demotes them back to the AI group (their history
+    is never deleted)."""
     p = default_path()
     keep = {normalise(DATE_RE.sub("", e.text).strip()) for e in parse_file(p)}
-    for r in db.c.execute("SELECT id, norm, generated FROM dorks WHERE grp='default'").fetchall():
+    for r in db.c.execute("SELECT id, norm, generated, origin FROM dorks WHERE grp='default'").fetchall():
+        if r["origin"] == "ai_promoted":
+            continue
         if r["norm"] not in keep and not r["generated"]:
             db.c.execute("DELETE FROM dorks WHERE id=?", (r["id"],))
-    db.c.execute("UPDATE dorks SET enabled=1, auto_disabled_reason=NULL WHERE grp='default'")
+    db.c.execute("UPDATE dorks SET enabled=1, auto_disabled_reason=NULL WHERE grp='default' AND "
+                 "COALESCE(origin,'shipped')!='ai_promoted'")
     rep = import_file(db, p, "default")
     db.set_meta("default_list_size", str(p.stat().st_size))
     db.commit()
+    if include_promoted:
+        from . import promotion
+        for r in promotion.promoted_rows(db):
+            promotion.demote(db, r["id"], "removed by /dorks reset-default --include-promoted", disable=False)
     return rep
+
+
+def reset_preview(db: DB, include_promoted: bool = False) -> dict:
+    """Counts shown before /dorks reset-default asks for confirmation."""
+    p = default_path()
+    keep = {normalise(DATE_RE.sub("", e.text).strip()) for e in parse_file(p)}
+    rows = db.c.execute("SELECT norm, generated, origin, enabled FROM dorks WHERE grp='default'").fetchall()
+    known = {r["norm"] for r in db.c.execute("SELECT norm FROM dorks")}
+    shipped = [r for r in rows if r["origin"] != "ai_promoted"]
+    return {"file_dorks": len(keep), "added": len(keep - known),
+            "removed": sum(1 for r in shipped if r["norm"] not in keep and not r["generated"]),
+            "reenabled": sum(1 for r in shipped if not r["enabled"]),
+            "promoted": sum(1 for r in rows if r["origin"] == "ai_promoted"), "include_promoted": include_promoted}
 
 
 def ensure_country_dorks(db: DB, countries: list[str]) -> int:
@@ -278,11 +302,12 @@ def estimate_days(total: int, per_cycle: int, interval_min: int) -> float | None
 
 
 # ── bookkeeping ──────────────────────────────────────────────────────────────────
-def record_run(db: DB, dork_id: int, results: int, new: int) -> None:
+def record_run(db: DB, dork_id: int, results: int, new: int, kept: int = 0) -> None:
+    """kept = results that passed the relevance gate (the denominator of a dork's precision)."""
     db.c.execute("UPDATE dorks SET last_run_at=?, run_count=run_count+1, hits_total=hits_total+?, "
-                 "new_programs_found=new_programs_found+?, "
+                 "new_programs_found=new_programs_found+?, kept_total=kept_total+?, "
                  "priority=CASE WHEN grp='ai' AND ?>0 AND priority<10 THEN priority+1 ELSE priority END WHERE id=?",
-                 (dates.now_iso(), results, new, new, dork_id))  # AI winners rise in the rotation
+                 (dates.now_iso(), results, new, kept, new, dork_id))  # AI winners rise in the rotation
 
 
 def auto_disable_unproductive_ai(db: DB, after_runs: int) -> int:

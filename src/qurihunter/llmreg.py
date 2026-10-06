@@ -196,6 +196,7 @@ class Router(LLM):
         self._inst: dict[str, LLM] = {}
         self._bulk = False
         self.host = "model registry"
+        self.last_model_id = ""  # which registry entry answered the most recent successful call (/why shows it)
 
     # ── plumbing ───────────────────────────────────────────────────────────────
     @property
@@ -326,6 +327,7 @@ class Router(LLM):
                 why.append(f"{m['id']}: {type(e).__name__}")
                 continue
             self._record(m, role, True, inst)
+            self.last_model_id = f"{m['id']} ({describe(m)})"
             return out
         raise LLMError(f"no model could handle role '{role}'" + (f" ({'; '.join(why)})" if why else " (none assigned)"))
 
@@ -385,6 +387,13 @@ class RoleView(LLM):
     def __init__(self, router: Router, role: str):
         self.r, self.role = router, role
         self.host, self.model = router.host, router.model
+
+    @property
+    def last_model_id(self) -> str:
+        return self.r.last_model_id
+
+    def bulk(self):
+        return self.r.bulk()
 
     def __bool__(self) -> bool:
         return bool(self.r.entries(self.role))

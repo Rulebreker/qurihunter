@@ -15,7 +15,7 @@ from .migrations import MIGRATIONS
 # Every command the product promises. The registry is checked against this at startup and in the tests.
 SPEC_COMMANDS = ["/scan", "/watch", "/config", "/model", "/filters", "/status", "/test", "/programs", "/export",
                  "/logs", "/help", "/quit", "/recency", "/dorks", "/memory", "/history", "/chat", "/alerts", "/why",
-                 "/version", "/sequence", "/providers", "/searxng", "/llm", "/background"]
+                 "/version", "/sequence", "/providers", "/searxng", "/llm", "/background", "/validate"]
 ALIASES = {"/exit": "/quit", "/q": "/quit", "/?": "/help"}
 
 
@@ -230,7 +230,7 @@ def _resend(ctx, args):
         ui.info("cancelled")
         return
     items = [(db.program(r["program_id"]), r["kind"]) for r in rows]
-    items = [(p, k) for p, k in items if p]
+    items = [(p, k) for p, k in items if p and p["verdict"] == "official_program"]  # not what was rejected/marked invalid since
     items.sort(key=lambda x: x[1] != "new")
     for p, k in items:
         db.c.execute("DELETE FROM deliveries WHERE program_id=? AND kind=? AND channel IN (%s)" % ",".join("?" * len(chans)),
@@ -287,6 +287,12 @@ def _release_pending(ctx, args):
     if not ui.yn(f"Send {len(waiting)} item(s) now, labelled 'age unverified'?", False):
         ui.info("cancelled")
         return
+    from . import validation
+    for r, _ in waiting:  # released before the page check: kept apart in NEEDS MANUAL CHECK, never mixed with verified finds
+        if validation.needs(r, cfg):
+            validation.apply(db, r["id"], validation.Result(url=r["url"], decision="not_validated",
+                                                            reason="released by you before the page validation ran"))
+    waiting = [(db.program(r["id"]), k) for r, k in waiting]
     res = notify.deliver(cfg, db, waiting, unverified={r["id"] for r, _ in waiting})
     for ch, r in res.items():
         (ui.ok if r == "ok" else ui.fail)(f"{ch}: {'sent ' + str(len(waiting)) if r == 'ok' else r + ' - still pending'}")
@@ -340,6 +346,11 @@ def explain(db, cfg, r) -> list[str]:
          f"  window: {dates.window_text(days)} · baseline={bool(r['baseline'])} · filtered={bool(r['filtered'])} · "
          f"verdict={r['verdict']}",
          "  delivered: " + ("; ".join(f"{ch}: {', '.join(k)}" for ch, k in sent.items()) or "no channel yet")]
+    from . import valcmds, validation
+    if "validity" in r.keys():
+        L += valcmds.why_lines(db, r)
+        if validation.needs(r, cfg) and cls in alerts.KINDS:
+            L.append("  → WAITING for the LLM page validation (next scan or background worker) before it can alert")
     if r["source"] == "web" and not r["launched_at"] and r["wayback_state"] in ("unchecked", "error") \
             and cfg.get("wayback", {}).get("enabled", True) and not r["baseline"] and cls in alerts.KINDS \
             and cfg["wayback"].get("on_error", "wait") == "wait":

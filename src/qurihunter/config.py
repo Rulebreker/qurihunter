@@ -10,8 +10,8 @@ from .paths import config_path
 
 PLATFORMS = ["hackerone", "bugcrowd", "intigriti", "yeswehack", "federacy", "disclose.io", "selfhosted", "web"]
 CATEGORIES = ["bounty", "vdp", "security.txt"]
-ROLES = ["classify", "summarize", "dork_gen", "chat", "date_kind"]
-CONFIG_VERSION = 7
+ROLES = ["classify", "summarize", "dork_gen", "chat", "date_kind", "validate"]
+CONFIG_VERSION = 8
 
 DEFAULTS: dict[str, Any] = {
     "version": CONFIG_VERSION,
@@ -28,13 +28,23 @@ DEFAULTS: dict[str, Any] = {
     "dorks": {"source": "default",  # default | custom | both
               "cooldown_days": 7, "ai_share": 0.2, "ai_prune_runs": 5, "ai_generate_every_days": 7,
               "ai_per_generation": 10, "prune_after_runs": 5,
-              "unfiltered_share": 0.10},  # share of the batch run WITHOUT the provider date filter (0-0.30)
+              "unfiltered_share": 0.10,  # share of the batch run WITHOUT the provider date filter (0-0.30)
+              # v8: evidence-based promotion of AI dorks into the default list (decided by code on counts, never by the LLM)
+              "ai_auto_promote": "ask",  # on | ask | off
+              "promote_min_runs": 3, "promote_min_verified": 2, "promote_min_precision": 0.3,
+              "promote_similarity": 0.8,  # token-set similarity at/above which a candidate duplicates a default dork
+              "demote_after_runs": 10, "demote_below_precision": 0.1},
     "alerts": {"alert_updated_only_pages": True,  # also alert pages whose only date is a last-updated/effective date
                "alert_weak_evidence": True,  # NEW alerts whose only evidence is "first seen by this tool/crawler": own section
                "show_skipped_in_digest": False,  # list "OLD, skipped" items in the digest
                "telegram_scan_summary": "changes_only",  # off | changes_only | daily
-               "retry_cap_s": 60},  # longest we wait on a Telegram 429 retry_after
+               "retry_cap_s": 60,  # longest we wait on a Telegram 429 retry_after
+               "alert_manual_check": True},  # v8: send low-confidence / unverifiable finds in a NEEDS MANUAL CHECK section
     "reclassify": {"pages_per_cycle": 20},  # LLM/page-fetch judgements per background cycle
+    # v8: LLM validation of a candidate's own page before it alerts (dork / self-hosted finds; platform feeds are skipped)
+    "validate": {"enabled": True, "min_confidence": 0.7, "max_chars": 6000, "per_scan_cap": 40,
+                 "background_per_cycle": 5, "use_feedback_examples": True, "max_examples": 4,
+                 "skip_sources": ["hackerone", "bugcrowd", "intigriti", "yeswehack", "federacy"]},  # platform feeds vouch themselves
     "pending": {"retry_enabled": True,  # background retry of waiting/failed alerts (REPL and /watch)
                 "retry_max_per_day": 24, "backoff_base_min": 5, "backoff_max_min": 360, "check_every_s": 60},
     "wayback": {"enabled": True, "max_per_scan": 40, "timeout": 20, "min_interval_s": 1.0, "concurrency": 1,
@@ -110,12 +120,27 @@ def _migrate(raw: dict) -> dict:
                 raw["models"] = [m]
     if raw.get("version", 1) < 7:
         raw["version"] = 7  # v3-v7 only add keys / refresh untouched defaults; the rest is filled in by the defaults
+    if raw.get("version", 1) < 8:
+        _backup_config(raw.get("version", 1))
+        _assign_validate(raw)
+        raw["version"] = 8
     g = raw.pop("google", None)
     if g is not None and "search" not in raw:
         age = {"d": "day", "w": "week", "m": "month", "y": "year"}.get(str(g.get("max_age", "m"))[:1], "month")
         raw["search"] = {"pages": g.get("pages", 1), "max_age": age, "providers": {
             "google": {"keys": g.get("keys", []), "cx": g.get("cx", ""), "limit": g.get("daily_limit", 100)}}}
     return raw
+
+
+def _assign_validate(raw: dict) -> None:
+    """v8: the new 'validate' role goes to the first enabled LOCAL model (m1 in the usual setup). Paid and Claude-CLI models
+    are never given it silently; /model roles <id> ... validate does that on request. Idempotent."""
+    ms = sorted([m for m in raw.get("models") or [] if isinstance(m, dict)], key=lambda m: m.get("order", 99))
+    if any("validate" in (m.get("roles") or []) for m in ms):
+        return
+    first = next((m for m in ms if m.get("enabled", True) and m.get("type") == "local"), None)
+    if first is not None:
+        first.setdefault("roles", []).append("validate")
 
 
 def _backup_config(old_version) -> None:

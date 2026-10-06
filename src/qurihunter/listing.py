@@ -11,15 +11,17 @@ from . import alerts, dates
 
 HELP = ("filters: --since <24h|7d|30d|YYYY-MM-DD>  --from <date> --to <date> (YYYY-MM-DD or DD/MM/YYYY)  "
         "--by <seen|launched>  --kind new|updated|old|all (default new+updated)  --include-baseline  --include-old  "
-        "--category program|securitytxt|all  --source <id>  --country <cc>  --text <word>  --limit <N>  "
-        "--wide | --compact")
+        "--category program|securitytxt|all  --validity verified|needs_check|weak|not_validated|none  --source <id>  "
+        "--country <cc>  --text <word>  --limit <N>  --wide | --compact")
 KINDS = ("new", "updated", "old", "baseline")
-VALUE_OPTS = ("--since", "--from", "--to", "--by", "--source", "--country", "--text", "--limit", "--kind", "--category")
+VALUE_OPTS = ("--since", "--from", "--to", "--by", "--source", "--country", "--text", "--limit", "--kind", "--category",
+              "--validity")
+VALIDITY = ("verified", "needs_check", "weak", "not_validated", "none")
 
 
 def parse_args(args: list[str]) -> dict:
     o = {"since": None, "from": None, "to": None, "by": "seen", "include_baseline": False, "include_old": False,
-         "source": None, "country": None, "text": None, "limit": None, "kind": None, "category": "all",
+         "source": None, "country": None, "text": None, "limit": None, "kind": None, "category": "all", "validity": None,
          "wide": False, "compact": False}
     it = iter(args)
     for a in it:
@@ -41,6 +43,8 @@ def parse_args(args: list[str]) -> dict:
         raise ValueError("--kind must be new, updated, old, baseline or all")
     if o["category"] not in ("program", "securitytxt", "all"):
         raise ValueError("--category must be program, securitytxt or all")
+    if o["validity"] is not None and o["validity"] not in VALIDITY:
+        raise ValueError(f"--validity must be one of {', '.join(VALIDITY)}")
     if o["limit"] is not None:
         try:
             o["limit"] = max(1, int(o["limit"]))
@@ -51,7 +55,7 @@ def parse_args(args: list[str]) -> dict:
 
 def has_filters(o: dict) -> bool:
     return bool(o["since"] or o["from"] or o["to"] or o["source"] or o["country"] or o["text"] or o["include_baseline"]
-                or o["include_old"] or o["by"] != "seen" or o["kind"] or o["category"] != "all")
+                or o["include_old"] or o["by"] != "seen" or o["kind"] or o["category"] != "all" or o["validity"])
 
 
 def _kinds_wanted(o: dict) -> set[str]:
@@ -78,14 +82,47 @@ def sent_text(sent: dict) -> str:
     return ", ".join(f"{ch}✓" for ch in ("telegram", "email", "chat") if ch in sent) or "unsent"
 
 
+VSHORT = {"verified": "verified", "needs_check": "needs check", "weak": "weak", "rejected": "rejected",
+          "not_validated": "not validated"}
+
+
+def _assessments(db, rows) -> dict[int, dict]:
+    import json
+    ids = sorted({r["validation_id"] for r in rows if "validation_id" in r.keys() and r["validation_id"]})
+    out: dict[int, dict] = {}
+    for i in range(0, len(ids), 500):
+        chunk = ids[i:i + 500]
+        for v in db.c.execute(f"SELECT id, assessment, confidence FROM validations WHERE id IN ({','.join('?' * len(chunk))})",
+                              chunk):
+            a = json.loads(v["assessment"] or "null") or {}
+            a["_conf"] = v["confidence"]
+            out[v["id"]] = a
+    return out
+
+
+def validity_cells(r: dict, a: dict | None) -> dict:
+    """_validity, _vkind, _vstatus, _vreward, _vscope, _vconf for /programs and /export."""
+    from .models import PLATFORM_SOURCES
+    v = r.get("validity")
+    label = VSHORT.get(v, "platform" if r.get("source") in PLATFORM_SOURCES else "-")
+    if r.get("label"):
+        label += " (you)"
+    a = a or {}
+    return {"_validity": label, "_vkind": a.get("program_kind") or "", "_vstatus": a.get("status") or "",
+            "_vreward": a.get("reward_text") or "", "_vscope": ("yes" if a.get("has_scope") else "no") if a else "",
+            "_vconf": f"{a['_conf']:.2f}" if a.get("_conf") is not None else ""}
+
+
 def decorate(db, cfg, rows, days) -> list[dict]:
     sm = sent_map(db)
+    asm = _assessments(db, rows)
     out = []
     for r in rows:
         d = dict(r)
         d["_kind"], d["_why"] = alerts.classify(r, days)
         d["_evidence"] = alerts.evidence_line(r, days)
         d["_sent"] = sm.get(r["id"], {})
+        d.update(validity_cells(d, asm.get(d.get("validation_id"))))
         out.append(d)
     return out
 
@@ -116,10 +153,14 @@ def run(db, o: dict, *, default_limit: int = 100, cfg: dict | None = None):
     if o["text"]:
         q += " AND (name LIKE ? OR url LIKE ? OR summary LIKE ?)"
         args += [f"%{o['text']}%"] * 3
-    if o["category"] == "securitytxt":
-        q += " AND kind='security.txt'"
+    if o["category"] == "securitytxt":  # bare security.txt AND pages the validator found to be a security contact only
+        q += " AND (kind='security.txt' OR COALESCE(validity,'')='weak')"
     elif o["category"] == "program":
-        q += " AND kind!='security.txt'"
+        q += " AND kind!='security.txt' AND COALESCE(validity,'')!='weak'"
+    if o.get("validity"):
+        q += " AND validity IS NULL" if o["validity"] == "none" else " AND validity=?"
+        if o["validity"] != "none":
+            args.append(o["validity"])
     allrows = decorate(db, cfg, db.c.execute(q, args).fetchall(), days)
     want = _kinds_wanted(o)
     launched = o["by"] == "launched"
@@ -181,7 +222,10 @@ def state(r) -> str:
 
 
 def _reward(r):
-    return f"{r['reward_max']:,.0f} {r['currency'] or ''}" if r["reward_max"] else "-"
+    if r["reward_max"]:
+        return f"{r['reward_max']:,.0f} {r['currency'] or ''}"
+    rt = r.get("_vreward") if hasattr(r, "get") else ""
+    return (rt[:40] + ("…" if len(rt) > 40 else "")) if rt else "-"
 
 
 def table(rows, title_text: str, width: int | None = None, *, wide: bool = False, compact: bool = False) -> Table | str:
@@ -197,6 +241,7 @@ def table(rows, title_text: str, width: int | None = None, *, wide: bool = False
             t.append(f"{_ev_short(r):24}")
             t.append(f"{(r['name'] or '')[:40]:40} ")
             t.append(f"[{sent_text(r['_sent'])}] ", style="dim")
+            t.append(f"<{r.get('_validity', '-')}> ", style="cyan")
             t.append(r["url"] + "\n", style="blue")
         return t
     full = wide or w >= 130
@@ -209,8 +254,13 @@ def table(rows, title_text: str, width: int | None = None, *, wide: bool = False
     t.add_column("Name", overflow="fold")
     if full:
         t.add_column("Type")
-        t.add_column("Reward")
+        t.add_column("Reward", overflow="fold")
         t.add_column("Cty")
+    t.add_column("Validity")
+    if full:
+        t.add_column("Status")
+        t.add_column("Scope")
+        t.add_column("Conf")
     t.add_column("Sent")
     t.add_column("URL", overflow="fold", style="blue")
     for r in rows:
@@ -220,6 +270,9 @@ def table(rows, title_text: str, width: int | None = None, *, wide: bool = False
         cells.append((r["name"] or "") + ("" if full else f"  [dim]{r['source']}[/dim]"))
         if full:
             cells += [r["kind"] or "", _reward(r), (r["country"] or "").upper() or "-"]
+        cells.append(r.get("_validity", "-"))
+        if full:
+            cells += [r.get("_vstatus") or "-", r.get("_vscope") or "-", r.get("_vconf") or "-"]
         cells += [sent_text(r["_sent"]), r["url"]]
         t.add_row(*cells)
     return t

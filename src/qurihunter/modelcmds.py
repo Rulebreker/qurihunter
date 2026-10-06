@@ -212,7 +212,8 @@ def _claude_cli(cfg: dict):
 def ask_roles(entry: dict) -> list[str]:
     allowed = llmreg.CLI_ROLES if entry["type"] == "claude_cli" else ROLES
     ui.info("Roles: classify (page classification), summarize (alert summaries), dork_gen (AI dorks), chat (/chat), "
-            "date_kind (date disambiguation).")
+            "date_kind (date disambiguation), validate (reads a candidate's page before it alerts; bulk-like, so the Claude CLI "
+            "takes it only with /llm bulk on).")
     raw = ui.ask(f"Roles for {entry['model']} (comma separated, Enter = {'all allowed' if entry['type'] != 'claude_cli' else 'chat, summarize, dork_gen'})",
                  "").strip()
     if not raw:
@@ -454,6 +455,20 @@ def cmd_llm(ctx, args):
                   f"{r['tin']}/{r['tout']}", money, f"${r['today_usd']:.4f}" if tracked else "-",
                   f"${r['month_usd']:.4f}" if tracked else "-", r["last_error"])
     ui.console.print(t)
+    if cfg.get("models"):  # which model answers each role right now (first unblocked one in the order)
+        rt = Table(title="Role routing (order = failover order)", header_style="bold")
+        rt.add_column("Role")
+        rt.add_column("Models", overflow="fold")
+        router = llmreg.Router(cfg, db)
+        for role in ROLES:
+            ents = router.entries(role)
+            cells = []
+            for m in ents:
+                b = router.blocked(m, role)
+                cells.append(m["id"] + (f" [skipped: {b}]" if b else ""))
+            rt.add_row(role, " → ".join(cells) or "[yellow]none assigned[/yellow]"
+                       + (" (finds go to NEEDS MANUAL CHECK as 'not validated')" if role == "validate" else ""))
+        ui.console.print(rt)
     rr = llmreg.role_rows(db)
     if rr:
         t2 = Table(title="Per role", header_style="bold")

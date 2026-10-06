@@ -132,7 +132,7 @@ def test_db_migration_creates_new_tables_and_backs_up(tmp_path):
     assert d.backup_made and d.backup_made.exists()
     names = {r[0] for r in d.c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"search_steps", "provider_health", "llm_usage"} <= names
-    assert d.c.execute("PRAGMA user_version").fetchone()[0] == len(migrations.MIGRATIONS) == 5
+    assert d.c.execute("PRAGMA user_version").fetchone()[0] == len(migrations.MIGRATIONS) == 6
     migrations.m5_sequence(d.c)  # idempotent
     d.c.close()
 

@@ -140,7 +140,7 @@ def test_sweep_can_be_switched_off_and_old_unfiltered_share_migrates(db, cfg, mo
     assert 7.0 not in seen
     config.config_path().write_text(json.dumps({"version": 6, "dorks": {"unfiltered_share": 0.25}}))
     c = config.load()
-    assert c["version"] == config.CONFIG_VERSION == 7 and c["dork_search_recency"]["sweep_share"] == 0.25
+    assert c["version"] == config.CONFIG_VERSION == 8 and c["dork_search_recency"]["sweep_share"] == 0.25
     assert c["dork_search_recency"]["first"] == "any"
 
 

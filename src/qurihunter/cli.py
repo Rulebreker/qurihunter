@@ -9,7 +9,7 @@ from datetime import datetime
 
 from rich.table import Table
 
-from . import alertcmds, background, dblock, checks, config, instance, listing, memcmds, modelcmds, retry, seqcmds, ui, wizard
+from . import alertcmds, background, dblock, checks, config, instance, listing, memcmds, modelcmds, retry, seqcmds, ui, valcmds, wizard
 from .config import enabled_platforms, mask
 from . import __version__
 from .db import DB
@@ -41,6 +41,24 @@ def run_scan(ctx, *, dorks=True, platforms=True, budget=None, interactive=False)
         _report(*scan(ctx.cfg, ctx.db, do_platforms=platforms, do_dorks=dorks, dork_budget=budget, use_llm=use_llm))
     except ScanLocked as e:
         ui.fail(str(e))
+        return
+    if interactive and dorks:
+        _ask_promotions(ctx)
+
+
+def _ask_promotions(ctx) -> None:
+    """ai_auto_promote = ask: in the REPL, offer each newly eligible AI dork once (asked again only when its evidence grows)."""
+    from . import promotion
+    if str(ctx.cfg["dorks"].get("ai_auto_promote", "ask")).lower() != "ask":
+        return
+    for e in promotion.unasked(ctx.db, ctx.cfg):
+        d = e.evidence
+        if ui.yn(f"AI dork #{e.dork_id} is eligible for the default list ({d['verified']} verified programs, precision "
+                 f"{d['precision']:.2f}, {d['runs']} runs): {e.text[:70]} - promote it?", False):
+            ok, msg = promotion.promote(ctx.db, ctx.cfg, e.dork_id)
+            (ui.ok if ok else ui.fail)(msg)
+        else:
+            promotion.decline(ctx.db, e)
 
 
 def cmd_scan(ctx, args):
@@ -145,7 +163,11 @@ def cmd_status(ctx, args):
             + (f" · LAST ERROR {a['last_err']['error']}" if a['last_err'] else "") + "  (details: /alerts status)")
     for why, n in a["reasons"].items():
         ui.info(f"  pending because: {n} x {why}")
-    from . import reclass, retry
+    from . import reclass, retry, validation
+    vc = validation.counts(ctx.db)
+    ui.info(f"Validation: {'on' if ctx.cfg['validate'].get('enabled', True) else 'OFF'} · verified {vc['verified']}, needs manual "
+            f"check {vc['needs_check']}, rejected {vc['rejected']}, weak {vc['weak']}, not validated {vc['not_validated']}  "
+            "(/validate status)")
     ui.info(retry.status(ctx.db, ctx.cfg))
     rp = reclass.progress(ctx.db)
     if rp["state"] != "idle":
@@ -224,6 +246,9 @@ def _programs_menu() -> list[str]:
 
 
 def cmd_programs(ctx, args):
+    if args and args[0] in ("mark", "revalidate"):
+        from . import valcmds
+        return (valcmds.mark if args[0] == "mark" else valcmds.revalidate)(ctx, args[1:])
     try:
         if not args:
             args = _programs_menu()
@@ -311,16 +336,19 @@ def cmd_export(ctx, args):
         ui.fail(str(e))
         return
     cols = ("source", "name", "url", "kind", "reward_max", "currency", "country", "first_seen", "launched_at",
-            "launched_at_source", "baseline", "delivered", "delivered_via", "_kind", "_evidence", "_sent")
+            "launched_at_source", "baseline", "delivered", "delivered_via", "_kind", "_evidence", "_sent",
+            "_validity", "_vkind", "_vstatus", "_vreward", "_vscope", "_vconf")
+    names = {"_validity": "validity", "_vkind": "program_kind", "_vstatus": "program_status", "_vreward": "reward_text",
+             "_vscope": "has_scope", "_vconf": "validation_confidence"}
     for r in rows:
         r["_sent"] = listing.sent_text(r["_sent"])
     if path.endswith(".json"):
         with open(path, "w") as f:
-            json.dump([{k: r[k] for k in cols} for r in rows], f, indent=2)
+            json.dump([{names.get(k, k): r[k] for k in cols} for r in rows], f, indent=2)
     else:
         with open(path, "w", newline="") as f:
             w = csv.writer(f)
-            w.writerow(cols)
+            w.writerow([names.get(k, k) for k in cols])
             for r in rows:
                 w.writerow([r[k] for k in cols])
     ui.ok(f"exported {len(rows)} programs ({desc}) to {path}")
@@ -380,15 +408,24 @@ HELP = [
     ("/filters", "adjust platforms / countries / categories / minimum reward"),
     ("/status [--all-hosts]", "last run per source, memory, alerts + pending reasons, dorks, quota, network health (API hosts; --all-hosts = every host)"),
     ("/test", "re-run every live connection test (keys, Telegram, email, LLM, sources)"),
-    ("/programs [N|filters]", "list programs with Kind + date evidence + delivery; no args opens a menu. "
+    ("/programs [N|filters]", "list programs with Kind + date evidence + validity + delivery; no args opens a menu. "
                               "--since 7d | --from/--to | --by seen|launched | --kind new|updated|old|all | "
-                              "--include-baseline | --include-old | --category program|securitytxt | --wide | --compact"),
+                              "--include-baseline | --include-old | --category program|securitytxt | "
+                              "--validity verified|needs_check|weak|not_validated|none | --wide | --compact"),
+    ("/programs mark <id|url> valid|invalid|weak [note]", "your label overrides the model, feeds the dork's statistics and is "
+                                                          "kept as a regression/few-shot example"),
+    ("/programs revalidate <id|url|--all-weak|--all-manual>", "re-run the LLM page validation, ignoring the cache"),
+    ("/validate <sub>", "status (verified / needs check / rejected / not validated, model, calls, cap) | on | off | "
+                        "test <url> (whole pipeline on one URL, stores nothing)"),
     ("/export [file] [filters]", "export programs to .csv/.json (same filters as /programs)"),
     ("/logs", "tail the log file"),
     ("/help", "this list"),
     ("/quit", "exit (also /exit, /q)"),
     ("/recency [N|24h|7d|30d|1y|any]", "show or set the alert window (default 7 days)"),
     ("/dorks <sub>", "import|list|enable|disable|priority|stats|test|prune|mode|reset-default|generate; test <dork> [--recency any|week|month|Nd] [--pages N] [--provider id] [--dry-run] shows the exact request + kept/dropped tables"),
+    ("/dorks <promotion>", "candidates (AI dorks vs every promotion condition) | promote <id|all-eligible> | demote <id> | "
+                           "export-default [--include-promoted] [--to <path>] (diff + confirmation) | "
+                           "list --group default|ai|custom --origin shipped|ai_promoted | reset-default [--include-promoted]"),
     ("/memory <sub>", "stats | export <path> | forget program|query|dork|all | reclassify [status|review|apply|cancel|--now] (background, capped, never alerts)"),
     ("/history [N]", "recent queries and what they found"),
     ("/chat [--new]", "talk to the LLM about your data (read-only DB access + limited searches)"),
@@ -405,7 +442,8 @@ COMMANDS = {"/scan": cmd_scan, "/watch": cmd_watch, "/config": cmd_config, "/mod
             "/recency": cmd_recency, "/chat": cmd_chat, "/dorks": memcmds.cmd_dorks, "/memory": memcmds.cmd_memory,
             "/history": memcmds.cmd_history, "/export": cmd_export, "/logs": cmd_logs,
             "/sequence": seqcmds.cmd_sequence, "/providers": seqcmds.cmd_providers, "/searxng": seqcmds.cmd_searxng,
-            "/alerts": alertcmds.cmd_alerts, "/background": seqcmds.cmd_background, "/why": alertcmds.cmd_why, "/version": alertcmds.cmd_version}
+            "/alerts": alertcmds.cmd_alerts, "/background": seqcmds.cmd_background, "/why": alertcmds.cmd_why, "/version": alertcmds.cmd_version,
+            "/validate": valcmds.cmd_validate}
 
 
 class QuitRepl(Exception):
@@ -524,8 +562,8 @@ def main(argv=None) -> int:
         worker = None
         if interactive and ctx.cfg.get("background_workers", True):
             from .llm import from_config
-            from . import reclass
-            worker = retry.Worker(extra=[reclass.job(from_config)])
+            from . import reclass, validation
+            worker = retry.Worker(extra=[reclass.job(from_config), validation.job(from_config)])
             worker.start()
         if not ctx.cfg["setup_done"] or a.command == "setup":
             wizard.first_run(ctx.cfg, ctx.save)

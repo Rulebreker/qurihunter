@@ -27,8 +27,11 @@ RUN: dict = {"old": 0, "old_ids": [], "wayback_calls": 0, "dropped": 0}
 
 
 def reset_run() -> None:
+    from . import validation
+    validation.reset_run()
     wayback.reset()
     RUN.update({"old": 0, "old_ids": [], "wayback_calls": 0, "deferred": 0, "dropped": 0})
+    RUN.pop("validate_budget", None)
 
 
 class ScanLocked(Exception):
@@ -208,7 +211,7 @@ def run_dorks(cfg: dict, db: DB, llm, prog: Progress, *, budget: int | None = No
         windowed = qdays is not None
         prog.update(task, description=f"Step {st['pos']}/{len(todo)}: {row['text'][:45]}…")
         attempted_any = cooled = False
-        seen_tot = found_tot = alert_tot = 0
+        seen_tot = found_tot = alert_tot = kept_tot = 0
         answered: list[str] = []
         done = False
         for prov in order:
@@ -225,7 +228,7 @@ def run_dorks(cfg: dict, db: DB, llm, prog: Progress, *, budget: int | None = No
             if not ok_av:
                 continue
             attempted_any = True
-            seen = found = alertable = 0
+            seen = found = alertable = kept_n = 0
             status = "ok"
             try:
                 prefer = None
@@ -237,6 +240,7 @@ def run_dorks(cfg: dict, db: DB, llm, prog: Progress, *, budget: int | None = No
                     seen += len(res.results)
                     from . import relevance
                     kept, dropped = relevance.filter_results(row["text"], res.results)  # before ANY llm call, fetch or storage
+                    kept_n += len(kept)
                     for it_d, why_d, spam_d in dropped:
                         RUN["dropped"] += 1
                         if spam_d:  # junk is junk for every dork: remember it. Mere irrelevance is NOT remembered.
@@ -247,7 +251,7 @@ def run_dorks(cfg: dict, db: DB, llm, prog: Progress, *, budget: int | None = No
                         llm_budget["left"] -= n_b  # a batched page costs one unit of the per-cycle page budget
                     for it in kept:
                         f, a = _handle_result(db, cfg, llm, it, windowed=windowed, first_run=first_run,
-                                              budget=llm_budget, wb=wb_budget)
+                                              budget=llm_budget, wb=wb_budget, dork_id=row["id"])
                         found += f
                         alertable += a
                     if not res.has_more:
@@ -270,6 +274,7 @@ def run_dorks(cfg: dict, db: DB, llm, prog: Progress, *, budget: int | None = No
                             window=prov.window_label(qdays), results=seen, new=found, status="ok")
             db.commit()
             seen_tot += seen
+            kept_tot += kept_n
             found_tot += found
             alert_tot += alertable
             answered.append(prov.id)
@@ -281,7 +286,7 @@ def run_dorks(cfg: dict, db: DB, llm, prog: Progress, *, budget: int | None = No
                 done = True
                 break
         if answered and not (len(answered) == 1 and answered[0].endswith("(cooldown)")):
-            dorkstore.record_run(db, row["id"], seen_tot, found_tot)
+            dorkstore.record_run(db, row["id"], seen_tot, found_tot, kept=kept_tot)
             ran += 1
             total_alertable += alert_tot
         if done or (answered and mode == "cascade"):
@@ -305,6 +310,8 @@ def run_dorks(cfg: dict, db: DB, llm, prog: Progress, *, budget: int | None = No
                 sequence.mark(db, st["id"], "error", note="all providers failed")
             prog.advance(task)
     dis = dorkstore.auto_disable_unproductive_ai(db, int(cfg["dorks"]["ai_prune_runs"]))
+    from . import promotion
+    msgs += promotion.after_batch(cfg, db)  # demotion of weak promoted dorks; ai_auto_promote on|ask|off
     detail = ", ".join(f"{k}: {v}" for k, v in by_provider.items()) or "none"
     msgs.insert(0, f"Dorks: {used} queries ({detail}), {total_alertable} new; {pool.total_remaining()} queries "
                    f"left across {pool.n_keys} keys")
@@ -342,7 +349,8 @@ def _origin(row) -> str:
 
 
 def _handle_result(db: DB, cfg: dict, llm, item, *, windowed: bool, first_run: bool, budget: dict | None = None,
-                   origin_delivered: str | None = None, wb: dict | None = None, sweep: bool = False) -> tuple[int, int]:
+                   origin_delivered: str | None = None, wb: dict | None = None, sweep: bool = False,
+                   dork_id: int | None = None) -> tuple[int, int]:
     """Classify/dedupe one search hit. Returns (programs_inserted, alertable). Old URLs are ignored silently.
     New candidates without an explicit in-window launch date are checked against the Wayback Machine: first captured
     before the window = an old page found late (stored as silent baseline)."""
@@ -403,6 +411,8 @@ def _handle_result(db: DB, cfg: dict, llm, item, *, windowed: bool, first_run: b
     db.remember_url(url, "official_program", p.confidence, p.classified_by, p.summary or "")
     if not rid:
         return 0, 0
+    if dork_id is not None:  # which dork found this NEW unique program (dork quality / promotion statistics)
+        db.c.execute("UPDATE programs SET found_by_dork=? WHERE id=?", (dork_id, rid))
     row = db.program(rid)
     cls, _ = alerts.classify(row, days)
     if cls == "old" or (baseline and wbres and wbres[0] == "old"):
@@ -432,7 +442,11 @@ def _refresh_dates(db: DB, cfg: dict, item) -> None:
 
 def enrich_and_notify(cfg: dict, db: DB, llm: Ollama | None) -> tuple[list, dict]:
     """Summarise and send everything still due (NEW and RECENTLY UPDATED, per channel). Failed sends stay pending."""
+    from . import validation
     items = backfill_wayback(db, cfg, alerts.due(db, cfg))
+    # LLM page validation: only for what would otherwise alert (passed relevance, classification, dedupe, date/Wayback)
+    items = validation.gate(cfg, db, items, llm, budget=RUN.setdefault(
+        "validate_budget", {"left": int(cfg.get("validate", {}).get("per_scan_cap", 40))}))
     if not items:
         return [], {}
     budget = int(cfg["llm"].get("max_summaries_per_cycle", 10))  # LLM calls are slow; the rest use a template
@@ -447,7 +461,7 @@ def enrich_and_notify(cfg: dict, db: DB, llm: Ollama | None) -> tuple[list, dict
             except LLMError as e:
                 log.warning("summary failed: %s", e)
     db.commit()
-    items = backfill_wayback(db, cfg, alerts.due(db, cfg), check=False)
+    items = validation.gate(cfg, db, backfill_wayback(db, cfg, alerts.due(db, cfg), check=False), llm, run=False)
     channels = [c for c in cfg["notify"]["channels"] if c in alerts.REAL_CHANNELS]
     rows = [r for r, _ in items]
     RUN["due_new"] = sum(1 for _, k in items if k == "new")

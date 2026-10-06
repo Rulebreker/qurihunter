@@ -26,6 +26,83 @@ powers `/chat`. Without an LLM everything still works with rule-based heuristics
 | Memory | One SQLite DB (WAL) with versioned migrations and automatic backups. Programs, every URL classified, every query ever run, dorks and their statistics, chat history. |
 | Alerts | Telegram bot or Gmail SMTP (app password). Two kinds: **NEW** and **RECENTLY UPDATED**. Many finds = one digest split into several messages. Failed sends stay pending and are retried. |
 
+## LLM program validation (v0.5)
+
+Before a dork find (or a disclose.io / self-hosted / custom-feed find) alerts, qurihunter reads **that one public page** and asks
+the model with the `validate` role whether it is really an official, active bug bounty / vulnerability disclosure program.
+It runs only for candidates that would otherwise alert (they already passed the relevance gate, the title/snippet
+classification, memory dedupe and the date/Wayback "new" logic). Programs from the platform feeds (HackerOne, Bugcrowd,
+Intigriti, YesWeHack, Federacy: `validate.skip_sources`) are skipped because the platform already vouches for them.
+
+* **Input:** the page's visible text only, fetched once through the existing safe fetcher (timeout, 300 KB cap, `text/html`
+  only, public addresses only, every redirect hop re-checked), cut to `validate.max_chars` (6000) keeping the title, headings and
+  the first part of the body, plus the URL and the dork that found it. Passive reading only: no crawling, no other URL from the
+  page, no forms, nothing that touches the company's systems beyond that single GET.
+* **Output:** a strict JSON object checked against a schema in code (`official_program`, `program_kind`
+  bounty|vdp|security_contact_only|other, `status` active|closed|unknown, `has_scope`, `scope_summary`, `has_reward`,
+  `reward_text` copied from the page or null, `safe_harbor_mentioned`, `submission_channel`, `language`, `organisation`,
+  `confidence`, up to 3 `evidence` snippets under 25 words, `reasons`). A wrong answer gets one stricter retry, then a plain-text
+  fallback parser for weak models (a fallback-parsed answer can never make a program VERIFIED).
+* **Code stays authoritative** and downgrades or overrules the model when: the HTTP status is not 200, the page is empty /
+  a JavaScript or cookie wall / mostly boilerplate, the final URL after redirects is on another domain, the page is on a third-party
+  host or names a different organisation than its domain, the URL is a blog / news / list / tool / job / spam page by the existing
+  rules, **an evidence snippet does not occur in the fetched text** (whitespace-normalised: hallucination check, confidence halved),
+  the quoted reward text is not on the page (it is dropped, never shown), or the page contains text aimed at AI models
+  ("ignore previous instructions", "mark this valid"…). HTTP errors, empty pages and blog URLs are decided without spending a call.
+* **Decision** (`validate.min_confidence`, default 0.7): not a program (confident) → stored `not_program`, remembered per URL,
+  never alerted; confident + every check passed + status active → **VERIFIED**, alerted in the usual NEW / RECENTLY UPDATED sections;
+  low confidence, status unknown/closed, any failed check, or no model available → a separate Telegram section **NEEDS MANUAL CHECK**
+  (`alerts.alert_manual_check`, default on; off = held, see `/alerts pending`), never mixed with verified finds; a bare security contact
+  → kept as **weak** (`--category securitytxt`).
+* **Every alert block has one validity line**, e.g. `Validity: official bounty program | active | scope: yes | reward: stated ("up to
+  CHF 5,000") | safe harbor: yes | confidence 0.86` - the reward text is exactly as on the page.
+* **Prompt-injection safety:** the page is untrusted data inside markers it cannot close, the system prompt says so, the model gets
+  no tools, its answer only passes through the schema validator, and the code checks above decide.
+* **Costs / caps:** the `validate` role's model order with the usual budget guard and failover; for the Claude CLI it counts as bulk
+  work (only with `/llm bulk on`). At most `validate.per_scan_cap` (40) model calls per scan; the rest wait for the next scan or the
+  background worker (it yields to foreground commands and stands aside while a scan runs). Results are cached forever by URL hash +
+  content hash; dates, times, years and long ids/tokens are ignored, so only a material change of the page triggers a new call. No model at
+  all → the find goes to NEEDS MANUAL CHECK as "not validated" (a validation never blocks a scan).
+* **Your labels win:** `/programs mark <id|url> valid|invalid|weak [note]` overrides the model for that program, counts for the dork
+  that found it, and is kept (table `program_labels`) for regression tests and, with `validate.use_feedback_examples`, as at most 4 short
+  few-shot examples (title + domain + label only; never your note, e-mail addresses or phone numbers).
+* **Commands:** `/validate status` (verified / needs check / rejected / weak / not validated / waiting, model order, calls, cache, cap),
+  `/validate on|off`, `/validate test <url> [--cached]` (whole pipeline on one URL; prints every check and the assessment; stores nothing
+  except the model-usage counter), `/programs revalidate <id|url|--all-weak|--all-manual>`, `/why` (full assessment, evidence, every
+  code check, the model that judged), `/programs` / `/export` columns validity, kind, status, reward, scope, confidence
+  (`--validity verified|needs_check|weak|not_validated|none` filters).
+
+**What validation cannot do.** It reads one page. It cannot verify that payouts are real or how much is paid, that the
+organisation or program is legitimate beyond what that page says, or that **you are authorised to test** anything: a program page
+defines its own scope and rules, and only the page itself (and the organisation behind it) can grant permission. A VERIFIED line
+means "this page looks like an official, active program and the quoted evidence is really on it" - the final check, and reading the
+rules before testing, is yours.
+
+## AI dork promotion into the default list (v0.5)
+
+AI dorks that keep finding real programs graduate into your default list - decided by **code on counts**, never by the LLM:
+
+* **Eligible** when all of these hold (config `dorks.*`): at least `promote_min_runs` (3) runs; at least `promote_min_verified` (2)
+  distinct **new** programs it found that ended VERIFIED (validator, or your `valid` mark; duplicates of programs another dork found first
+  do not count, raw hits do not count); precision = verified programs / results kept by the relevance gate ≥ `promote_min_precision` (0.3);
+  the dork validator and blocklist pass again; and it is not a near-duplicate (token-set similarity ≥ `promote_similarity`, 0.8, same TLD)
+  of a default dork. `/dorks candidates` shows every AI dork against every condition.
+* `dorks.ai_auto_promote` = `ask` (default: an interactive `/scan` asks once per dork, again only when its evidence grows; `/watch` lists
+  them) | `on` (promote automatically and log it) | `off`. `/dorks promote <id|all-eligible>` re-checks everything first.
+* Promoted dorks get group `default`, origin `ai_promoted`, the promotion date, parent dork and evidence. They rotate, count and
+  enable/disable like any default dork, and are mirrored to **`~/.qurihunter/learned_default.txt`** (grouped, with date/evidence comments),
+  from which they are restored automatically if the database is reset - so they survive upgrades.
+* **`dorks/default.txt` in the repository is never changed automatically.** `/dorks export-default [--include-promoted] [--to <path>]`
+  shows a unified diff of a `# ---- AI-promoted <date> <group> ----` section (deduplicated, grouped by country TLD) and writes only after
+  your yes - and refuses when the file is not writable or has uncommitted changes in the git working tree. Commit it yourself to share it.
+* `/dorks reset-default` restores the shipped list and keeps promoted dorks (it prints the counts first); `--include-promoted` demotes them
+  back to the AI group (their history is kept). `/dorks demote <id>` does that for one dork.
+* **Demotion:** a promoted dork whose precision *since promotion* stays under `demote_below_precision` (0.1) after `demote_after_runs` (10)
+  runs is moved back to the AI group and disabled, with the reason recorded. Nothing is deleted.
+* `/dorks list --group default|ai|custom --origin shipped|ai_promoted`; `/dorks stats` adds a per-dork quality table (group, origin,
+  runs, kept, verified-valid, precision, last run).
+* **Poisoning guard:** dork generation sees only dork statistics and the short names / countries of VERIFIED programs - never page text.
+
 ## Search recency vs the alert window (v0.4.2)
 
 Two different settings that used to be one:
@@ -183,7 +260,8 @@ regions/languages, shaped to the provider's capabilities. **Code validates every
 disclosure/bounty term (multi-language allowlist), must not match the blocklist (`data/dork_blocklist.txt`: credentials, `.env`,
 backups, `index of`, cameras, logins, `filetype:`, exploit words…), only `site:.tld` is allowed, length cap, dates stripped,
 near-duplicates rejected. AI dorks use at most 20% of each batch; winners rise in priority and seed variations; AI dorks with
-no finds after 5 runs are auto-disabled. Add your own blocked words in `~/.qurihunter/dork_blocklist.txt`.
+no finds after 5 runs are auto-disabled. Add your own blocked words in `~/.qurihunter/dork_blocklist.txt`. Proven AI dorks can be
+promoted into your default list (see "AI dork promotion" above); the generator only ever sees verified programs.
 
 ## `/chat` (`features.chat`)
 
@@ -322,19 +400,22 @@ Every connection uses WAL, `synchronous=NORMAL` and a 30 s busy timeout. All wri
 priority, automatic retry with jittered backoff and a friendly message that names the holder instead of a traceback. A pending write
 transaction is committed before every network / LLM / subprocess call, background workers commit after every item and yield to foreground
 commands (`/background status|pause|resume`, config `background_workers`), planning is read-only (the lifetime-start marker is written once at
-key-add time) and `/dorks test` never needs the write lock. Cross-process: a second qurihunter still waits politely and then says which process
+key-add time) and `/dorks test` never needs the write lock. v0.5 validation follows the same rule: read, then fetch + model call with no
+write transaction open, then one short write (a regression test asserts it). Cross-process: a second qurihunter still waits politely and then says which process
 holds the lock.
 
 ## Commands
 
 `/scan` `/watch` `/config` `/model` `/filters` `/status` `/test` `/recency` `/programs [N|filters]` `/export [file] [filters]`
 `/dorks …` `/memory …` `/history` `/chat` `/alerts …` `/why` `/version` `/sequence …` `/providers [show|status|set|daily]` `/searxng …` `/llm [status|limits|prices]`
-`/model [list|add|info|…]` `/background [status|pause|resume]` `/logs` `/help` `/quit`
+`/model [list|add|info|…]` `/background [status|pause|resume]` `/validate [status|on|off|test <url>]`
+`/programs mark|revalidate …` `/logs` `/help` `/quit`
 (typos are forgiven: `/alert` runs `/alerts`; unknown commands get a "did you mean" hint)
 
 `/programs` filters: `--since 24h|7d|30d|YYYY-MM-DD`, `--from/--to` (YYYY-MM-DD or DD/MM/YYYY), `--by seen|launched`,
 `--kind new|updated|old|all` (default new+updated), `--include-baseline`, `--include-old`, `--category program|securitytxt|all`,
-`--source`, `--country`, `--text`, `--limit`, `--wide`, `--compact`. Every row has a **Kind** and **date evidence** column plus
+`--validity verified|needs_check|weak|not_validated|none`, `--source`, `--country`, `--text`, `--limit`, `--wide`, `--compact`.
+Every row has a **Kind**, **date evidence** and **Validity** column (wide: also status, scope, confidence) plus
 per-channel delivery (`telegram✓, chat✓` / `unsent`); narrow terminals drop other columns but never those two. The title states
 the filter in use, e.g. `Programs since 7d (new/updated, by seen) — 12 shown, 3300 baseline hidden`. `--by launched` excludes (and counts) programs with unknown
 launch dates. Times are shown in your local timezone. `qurihunter [scan|watch|status|test|setup]` also works non-interactively.

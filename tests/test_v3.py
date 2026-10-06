@@ -727,8 +727,11 @@ def test_m3_migration_splits_chat_from_real_deliveries(tmp_path):
 
 def test_config_v3_defaults_and_old_config_upgrade(tmp_path, monkeypatch):
     c = config.load()
-    assert c["alerts"] == {"alert_updated_only_pages": True, "alert_weak_evidence": True, "show_skipped_in_digest": False,
-                           "telegram_scan_summary": "changes_only", "retry_cap_s": 60}
+    v3_keys = ("alert_updated_only_pages", "alert_weak_evidence", "show_skipped_in_digest", "telegram_scan_summary", "retry_cap_s")
+    assert {k: c["alerts"][k] for k in v3_keys} == {"alert_updated_only_pages": True, "alert_weak_evidence": True,
+                                                    "show_skipped_in_digest": False, "telegram_scan_summary": "changes_only",
+                                                    "retry_cap_s": 60}
+    assert c["alerts"]["alert_manual_check"] is True  # v0.5 addition
     assert c["wayback"]["enabled"] and c["version"] == config.CONFIG_VERSION
     config.save({"version": 1, "notify": {"channels": ["telegram"], "telegram": {"token": "t", "chat_id": "1"}}})
     c = config.load()

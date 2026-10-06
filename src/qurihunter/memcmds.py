@@ -21,9 +21,11 @@ def cmd_dorks(ctx, args):
     rest = args[1:]
     fn = {"list": _list, "import": _import, "enable": _toggle(1), "disable": _toggle(0), "priority": _priority,
           "stats": _stats, "test": _test, "prune": _prune, "mode": _mode, "reset-default": _reset,
-          "generate": _generate, "ai": _ai}.get(sub)
+          "generate": _generate, "ai": _ai, "candidates": _candidates, "promote": _promote, "demote": _demote,
+          "export-default": _export_default}.get(sub)
     if not fn:
-        ui.fail("usage: /dorks list|import|enable|disable|priority|stats|test|prune|mode|reset-default|generate|ai")
+        ui.fail("usage: /dorks list|import|enable|disable|priority|stats|test|prune|mode|reset-default|generate|ai|"
+                "candidates|promote|demote|export-default")
         return
     if sub != "test":  # a test only reads: it must not need the write lock (the default list is imported by other commands)
         dorkstore.ensure_default(ctx.db)
@@ -42,16 +44,27 @@ def _list(ctx, a):
         if grp not in ("default", "custom", "ai"):
             ui.fail("--group must be default, custom or ai")
             return
+    origin = None
+    if "--origin" in a:
+        try:
+            origin = a[a.index("--origin") + 1]
+        except IndexError:
+            origin = ""
+        if origin not in ("shipped", "ai_promoted", "ai", "custom"):
+            ui.fail("--origin must be shipped, ai_promoted, ai or custom")
+            return
     q, args = "SELECT * FROM dorks WHERE enabled=?", [0 if disabled else 1]
     if grp:
         q += " AND grp=?"; args.append(grp)
+    if origin:
+        q += " AND COALESCE(origin, 'shipped')=?"; args.append(origin)
     rows = ctx.db.c.execute(q + " ORDER BY priority DESC, id", args).fetchall()
-    t = Table(title=f"Dorks ({'disabled' if disabled else 'enabled'}{', ' + grp if grp else ''}) — {len(rows)}",
-              header_style="bold")
-    for c in ("ID", "Group", "Pri", "Runs", "Hits", "Found", "Last run", "Dork"):
+    t = Table(title=f"Dorks ({'disabled' if disabled else 'enabled'}{', ' + grp if grp else ''}"
+                    f"{', origin ' + origin if origin else ''}) — {len(rows)}", header_style="bold")
+    for c in ("ID", "Group", "Origin", "Pri", "Runs", "Hits", "Found", "Last run", "Dork"):
         t.add_column(c, overflow="fold")
     for r in rows[:200]:
-        t.add_row(str(r["id"]), r["grp"], str(r["priority"]), str(r["run_count"]), str(r["hits_total"]),
+        t.add_row(str(r["id"]), r["grp"], r["origin"] or "shipped", str(r["priority"]), str(r["run_count"]), str(r["hits_total"]),
                   str(r["new_programs_found"]), dates.to_local_day(r["last_run_at"]),
                   _short(r["text"]) + (f"  [dim]({r['auto_disabled_reason']})[/dim]" if r["auto_disabled_reason"] else ""))
     ui.console.print(t)
@@ -129,6 +142,7 @@ def _stats(ctx, a):
         for r in s["top"]:
             tt.add_row(str(r["id"]), r["grp"], str(r["new_programs_found"]), str(r["run_count"]), _short(r["text"]))
         ui.console.print(tt)
+    _quality_table(ctx)
     _capabilities(ctx)
     ai = ctx.db.c.execute("SELECT * FROM dorks WHERE grp='ai' ORDER BY new_programs_found DESC, id DESC LIMIT 10").fetchall()
     if ai:
@@ -140,6 +154,24 @@ def _stats(ctx, a):
                        str(r["new_programs_found"]), str(r["run_count"]), str(r["parent_dork_id"] or "-"),
                        _short(r["text"], 50), _short(r["rationale"] or "", 50))
         ui.console.print(tt)
+
+
+def _quality_table(ctx, limit: int = 25) -> None:
+    """Per-dork quality: group, origin, runs, kept results, verified-valid new programs, precision, last run."""
+    from . import promotion
+    rows = ctx.db.c.execute("SELECT * FROM dorks WHERE run_count>0").fetchall()
+    if not rows:
+        return
+    q = [(r, promotion.quality(ctx.db, r)) for r in rows]
+    q.sort(key=lambda x: (-x[1]["verified"], -x[1]["precision"], -x[1]["runs"]))
+    t = Table(title=f"Dork quality (top {min(limit, len(q))} of {len(q)} that ran; precision = verified-valid / kept)",
+              header_style="bold")
+    for c in ("ID", "Group", "Origin", "Runs", "Kept", "Verified-valid", "Precision", "Last run", "Dork"):
+        t.add_column(c, overflow="fold")
+    for r, d in q[:limit]:
+        t.add_row(str(r["id"]), r["grp"], r["origin"] or "shipped", str(d["runs"]), str(d["kept"]), str(d["verified"]),
+                  f"{d['precision']:.2f}", dates.to_local_day(r["last_run_at"]), _short(r["text"], 55))
+    ui.console.print(t)
 
 
 def capability_table(cfg) -> Table:
@@ -371,9 +403,15 @@ def _mode(ctx, a):
 
 
 def _reset(ctx, a):
-    if not ui.yn("Restore dorks/default.txt (re-enables defaults; custom and AI dorks stay untouched)?", True):
+    inc = "--include-promoted" in a
+    pv = dorkstore.reset_preview(ctx.db, inc)
+    ui.info(f"{dorkstore.default_path().name}: {pv['file_dorks']} shipped dorks · {pv['added']} would be added · "
+            f"{pv['reenabled']} re-enabled · {pv['removed']} default dork(s) no longer in the file removed · "
+            f"{pv['promoted']} AI-promoted dork(s) " + ("DEMOTED back to the AI group (history kept)" if inc else
+                                                       "kept (use --include-promoted to demote them too)"))
+    if not ui.yn("Restore the shipped default list (custom and AI dorks stay untouched)?", True):
         return
-    r = dorkstore.reset_default(ctx.db)
+    r = dorkstore.reset_default(ctx.db, include_promoted=inc)
     ui.ok(f"default list restored: {r.text()}")
 
 
@@ -411,6 +449,95 @@ def _generate(ctx, a):
     ui.ok(rep.text())
     for t in rep.accepted_texts:
         ui.console.print(f"  + {t}")
+
+
+def _candidates(ctx, a):
+    from . import promotion
+    rows = promotion.candidates(ctx.db, ctx.cfg)
+    pc = ctx.cfg["dorks"]
+    ui.info(f"Promotion needs: >= {pc['promote_min_runs']} runs, >= {pc['promote_min_verified']} verified-valid NEW programs, "
+            f"precision >= {pc['promote_min_precision']}, validator + blocklist pass, not a near-duplicate of a default dork "
+            f"(similarity < {pc['promote_similarity']}) · ai_auto_promote = {pc['ai_auto_promote']}")
+    if not rows:
+        ui.info("no AI dork has run yet")
+        return
+    t = Table(title="AI dorks vs the promotion conditions", header_style="bold")
+    for c in ("ID", "Eligible", "Runs", "Kept", "Verified", "Precision", "Missing", "Dork"):
+        t.add_column(c, overflow="fold")
+    for e in rows[:60]:
+        d = e.evidence
+        t.add_row(str(e.dork_id), "[green]YES[/green]" if e.eligible else "no", str(d["runs"]), str(d["kept"]),
+                  str(d["verified"]), f"{d['precision']:.2f}", "; ".join(e.failed()) or "-", _short(e.text, 50))
+    ui.console.print(t)
+
+
+def _promote(ctx, a):
+    from . import promotion
+    if not a:
+        ui.fail("usage: /dorks promote <id|all-eligible>")
+        return
+    if a[0] == "all-eligible":
+        ids = [e.dork_id for e in promotion.candidates(ctx.db, ctx.cfg, only_eligible=True)]
+        if not ids:
+            ui.info("no AI dork is eligible right now (/dorks candidates)")
+            return
+        if not ui.yn(f"Promote {len(ids)} eligible AI dork(s) into the default list?", True):
+            return
+    elif a[0].isdigit():
+        ids = [int(a[0])]
+    else:
+        ui.fail("usage: /dorks promote <id|all-eligible>")
+        return
+    for i in ids:
+        ok, msg = promotion.promote(ctx.db, ctx.cfg, i)
+        (ui.ok if ok else ui.fail)(msg)
+    p = promotion.learned_path()
+    if p.exists():
+        ui.info(f"mirrored to {p} (dorks/default.txt is untouched; /dorks export-default --include-promoted to share them)")
+
+
+def _demote(ctx, a):
+    from . import promotion
+    if not a or not a[0].isdigit():
+        ui.fail("usage: /dorks demote <id>")
+        return
+    ok, msg = promotion.demote(ctx.db, int(a[0]), "demoted by you", disable=False)
+    (ui.ok if ok else ui.fail)(msg)
+
+
+def _export_default(ctx, a):
+    """/dorks export-default [--include-promoted] [--to <path>]: writes ONLY after showing a diff and a yes."""
+    from pathlib import Path
+    from . import promotion
+    inc = "--include-promoted" in a
+    if "--to" in a:
+        try:
+            target = Path(a[a.index("--to") + 1]).expanduser()
+        except IndexError:
+            ui.fail("--to needs a path")
+            return
+    else:
+        target = dorkstore.REPO_DEFAULT
+        if not target.parent.exists():
+            ui.fail("no repository checkout found (dorks/default.txt): use --to <path>")
+            return
+    why = promotion.refuse_reason(target)
+    if why:
+        ui.fail(f"not writing {target}: {why}")
+        return
+    old, new = promotion.export_text(ctx.db, target, inc)
+    if old == new:
+        ui.info(f"{target}: nothing to change" + ("" if inc else " (add --include-promoted to export the AI-promoted dorks)"))
+        return
+    d = promotion.diff(old, new, target.name)
+    ui.console.print(d, markup=False, highlight=False)
+    n = sum(1 for ln in d.splitlines() if ln.startswith("+") and not ln.startswith("+++") and not ln[1:].lstrip().startswith("#")
+            and ln[1:].strip())
+    if not ui.yn(f"Write these changes to {target} ({n} dork line(s) added)?", False):
+        ui.info("not written")
+        return
+    target.write_text(new, encoding="utf-8")
+    ui.ok(f"wrote {target} - review and commit it yourself (git diff {target.name})")
 
 
 # ── /memory & /history ──────────────────────────────────────────────────────────

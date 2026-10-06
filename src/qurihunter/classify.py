@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
 from . import datekind
@@ -130,39 +131,78 @@ def public_target(url: str) -> tuple[bool, str]:
     return True, ""
 
 
-def fetch_page(url: str, limit: int = 4000, *, max_redirects: int = 3) -> str:
-    """Page text for classification, fetched defensively: only URLs that pass the spam rules, http(s) to public addresses only,
-    redirects followed by hand (a hop to ANOTHER domain must pass the spam/ignored-domain gate again, every hop is
-    SSRF-checked), text/html types only (no downloads), body capped at MAX_BYTES, timeout, no JavaScript (tags stripped)."""
+@dataclass
+class PageDoc:
+    """One defensively fetched page. `text` is the visible text only (scripts, styles, nav, footers and tags removed)."""
+    url: str
+    final_url: str = ""
+    status: int = 0  # 0 = not fetched (refused / network error / too many redirects)
+    title: str = ""
+    headings: list = field(default_factory=list)
+    text: str = ""
+    error: str = ""
+    hops: list = field(default_factory=list)  # every URL visited, in order
+
+    @property
+    def ok(self) -> bool:
+        return self.status == 200 and bool(self.text)
+
+
+def _visible(html_: str) -> tuple[str, list[str], str]:
+    """(title, headings, visible text) from raw HTML. No JavaScript is ever run."""
+    import html as _h
+    t = re.search(r"(?is)<title[^>]*>(.*?)</title>", html_)
+    title = _h.unescape(re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", t.group(1)))).strip()[:200] if t else ""
+    heads = [_h.unescape(re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", m.group(2)))).strip()
+             for m in re.finditer(r"(?is)<(h[1-3])[^>]*>(.*?)</\1>", html_)]
+    body = re.sub(r"(?is)<(script|style|nav|footer|noscript|template)[^>]*>.*?</\1>", " ", html_)
+    body = re.sub(r"(?is)<head[^>]*>.*?</head>", " ", body)
+    text = _h.unescape(re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", body))).strip()
+    return title, [h[:160] for h in heads if h][:20], text
+
+
+def fetch_doc(url: str, *, max_redirects: int = 3) -> PageDoc:
+    """The ONE page at `url`, fetched passively and defensively: only URLs that pass the spam rules, http(s) to public
+    addresses only, redirects followed by hand (a hop to ANOTHER domain must pass the spam/ignored-domain gate again, every hop
+    is SSRF-checked), text/html types only (no downloads), body capped at MAX_BYTES, timeout, no JavaScript. Never follows
+    links found on the page, never submits anything."""
     from urllib.parse import urljoin
     from . import relevance
+    doc = PageDoc(url=url, final_url=url)
     cur = url
     if not relevance.url_ok(cur):
-        return ""  # a junk/redirector URL is never fetched
+        doc.error = "URL failed the spam / redirector rules"
+        return doc  # a junk/redirector URL is never fetched
     try:
         for _ in range(max_redirects + 1):
+            doc.hops.append(cur)
             ok, why = public_target(cur)
             if not ok:
                 log.info("fetch refused %s: %s", cur, why)
-                return ""
+                doc.error = f"refused: {why}"
+                return doc
             r = get(cur, timeout=12, retries=1, allow_redirects=False, stream=True,
                     headers={"Accept": "text/html,text/plain;q=0.8"})
+            doc.final_url, doc.status = cur, r.status_code
             if 300 <= r.status_code < 400 and r.headers.get("Location"):
                 nxt = urljoin(cur, r.headers["Location"])
                 r.close()
                 if registrable_domain(host_of(nxt)) != registrable_domain(host_of(cur)) and not relevance.url_ok(nxt):
                     log.info("fetch refused a redirect %s -> %s (gate)", cur, nxt)
-                    return ""
+                    doc.error, doc.status = f"redirect to {nxt} refused by the spam / ignored-domain gate", 0
+                    return doc
                 cur = nxt
                 continue
             ctype = r.headers.get("content-type", "").split(";")[0].strip().lower()
             if r.status_code != 200 or ctype not in ALLOWED_CTYPES or "attachment" in r.headers.get("content-disposition", "").lower():
                 r.close()
-                return ""
+                doc.error = f"HTTP {r.status_code}" if r.status_code != 200 else f"content type '{ctype or '?'}' is not a page"
+                return doc
             try:
                 if int(r.headers.get("content-length", 0)) > MAX_BYTES * 5:
                     r.close()
-                    return ""
+                    doc.error = "page too large"
+                    return doc
             except ValueError:
                 pass
             buf, n = [], 0
@@ -172,13 +212,28 @@ def fetch_page(url: str, limit: int = 4000, *, max_redirects: int = 3) -> str:
                 if n >= MAX_BYTES:
                     break
             r.close()
-            html_ = b"".join(buf).decode(r.encoding or "utf-8", errors="replace")
-            body = re.sub(r"(?is)<(script|style|nav|footer|noscript|template)[^>]*>.*?</\1>", " ", html_)
-            return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", body)).strip()[:limit]
-        return ""  # too many redirects
+            raw = b"".join(buf).decode(r.encoding or "utf-8", errors="replace")
+            if ctype == "text/plain":
+                doc.text = re.sub(r"\s+", " ", raw).strip()
+            else:
+                doc.title, doc.headings, doc.text = _visible(raw)
+            return doc
+        doc.error, doc.status = "too many redirects", 0
+        return doc
     except Exception as e:  # noqa: BLE001
         log.debug("page fetch failed %s: %s", url, e)
+        doc.error, doc.status = f"fetch failed: {type(e).__name__}", 0
+        return doc
+
+
+def fetch_page(url: str, limit: int = 4000, *, max_redirects: int = 3) -> str:
+    """Page text for classification (see fetch_doc for the safety rules). Empty string when the page is not a 200 text page."""
+    doc = fetch_doc(url, max_redirects=max_redirects)
+    if doc.status != 200:
         return ""
+    if doc.title and not doc.text.startswith(doc.title):  # keep the old behaviour: the <title> text led the stripped body
+        return f"{doc.title} {doc.text}".strip()[:limit]
+    return doc.text[:limit]
 
 
 def fetch_text(url: str, limit: int = 4000) -> str:

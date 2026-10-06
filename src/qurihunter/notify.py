@@ -21,14 +21,17 @@ TG_LIMIT = 3900  # Telegram's hard limit is 4096 characters of *parsed* text; ke
 _sleep = time.sleep
 SECTION = {"new": ("🆕", "NEW"), "new_weak": ("🆕", "NEW (weak evidence)"),
            "new_unverified": ("❔", "NEW — age unverified"), "updated": ("♻️", "RECENTLY UPDATED"),
-           "old": ("📦", "OLD, SKIPPED")}
+           "old": ("📦", "OLD, SKIPPED"), "manual": ("🔎", "NEEDS MANUAL CHECK")}
 
 
 def section_of(r, kind: str, unverified=()) -> str:
+    from .validation import is_manual
+    if kind == "new" and r["id"] in unverified:
+        return "new_unverified"  # released by you before verification: its own section (validity line says so too)
+    if is_manual(r):
+        return "manual"  # low confidence / unverifiable / not validated: never mixed with verified finds
     if kind != "new":
         return kind
-    if r["id"] in unverified:
-        return "new_unverified"
     return "new_weak" if alerts.basis(r)[1] else "new"
 
 
@@ -62,8 +65,20 @@ def block(r, kind: str, days: float | None, sample: bool = False, unverified: bo
     ev = alerts.evidence_line(r, days)
     if kind == "new":
         ev += f"\nBasis: {'age unverified' if unverified else alerts.basis(r)[0]}"
+    ev += "\n" + validity_text(r)
     return (f"<b>{html.escape(name)}</b>\n{html.escape(meta)}\n{html.escape(url, quote=False)}\n<i>{html.escape(ev)}</i>",
             f"{name}\n{meta}\n{url}\n{ev}")
+
+
+def validity_text(r) -> str:
+    """One 'Validity: ...' line for every alert block (the reward text in it is always copied from the page, never invented)."""
+    from .models import PLATFORM_SOURCES
+    keys = r.keys()
+    if "validity_line" in keys and r["validity_line"]:
+        return r["validity_line"]
+    if r["source"] in PLATFORM_SOURCES:
+        return f"Validity: listed on {r['source']} (the platform vouches for it; page not validated)"
+    return "Validity: not validated"
 
 
 def _header(kind: str, n: int | None, cont: bool, sample: bool) -> tuple[str, str]:
@@ -270,6 +285,8 @@ def samples() -> list[tuple[dict, str]]:
     base = {"id": 0, "kind": "bounty", "reward_max": 5000, "currency": "USD", "country": "ch", "source": "sample",
             "verdict": "official_program", "filtered": 0, "baseline": 0, "wayback_first": None}
     now = __import__("qurihunter.dates", fromlist=["x"]).now_iso()
+    base["validity_line"] = ("Validity: official bounty program | active | scope: yes | reward: stated (\"up to $5,000\") | "
+                             "safe harbor: yes | confidence 0.90")
     new = dict(base, name="Example Corp — Bug Bounty", url="https://example.com/security/bug-bounty", launched_at=now,
                launched_at_source="page_date", date_kind="published", updated_at=None, wayback_state="none", first_seen=now)
     upd = dict(base, id=0, name="Example Org — Responsible Disclosure", url="https://example.org/responsible-disclosure",

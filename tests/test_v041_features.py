@@ -600,7 +600,7 @@ def test_config_v6_refreshes_only_untouched_old_defaults_with_a_backup():
     raw = {"version": 5, "lifetime_target_days": 60, "claude_cli": {"calls_per_hour": 6, "calls_per_day": 30, "min_interval_s": 30}}
     config.config_path().write_text(json.dumps(raw))
     c = config.load()
-    assert c["version"] == config.CONFIG_VERSION == 7 and c["lifetime_target_days"] == 365
+    assert c["version"] == config.CONFIG_VERSION == 8 and c["lifetime_target_days"] == 365
     assert (c["claude_cli"]["calls_per_hour"], c["claude_cli"]["calls_per_day"], c["claude_cli"]["batch_size"]) == (12, 80, 10)
     assert json.loads(config.config_path().with_name("config.json.bak-v5").read_text()) == raw
     user = {"version": 5, "lifetime_target_days": 90, "claude_cli": {"calls_per_hour": 3, "calls_per_day": 9, "min_interval_s": 60}}
